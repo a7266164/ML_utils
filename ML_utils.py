@@ -9,6 +9,7 @@ def MLP_evaluate_tabular_data(datapath, savepath):
     from sklearn.metrics import matthews_corrcoef, accuracy_score, precision_recall_fscore_support, roc_auc_score, confusion_matrix
     from torch.utils.data import DataLoader, TensorDataset
     import matplotlib.pyplot as plt
+    import shap
     
     '''
     Build a MLP model to quickly analyze tabular data
@@ -62,6 +63,9 @@ def MLP_evaluate_tabular_data(datapath, savepath):
         if (x.dtypes == 'object').any():
             x = pd.get_dummies(x)
 
+        feature_names = x.columns
+        print(feature_names)
+
         # 切割訓練集、測試集
         x_temp, x_test, y_temp, y_test = train_test_split(x, y, test_size=0.2, random_state=None, stratify=y)
 
@@ -76,9 +80,16 @@ def MLP_evaluate_tabular_data(datapath, savepath):
         y_train = y_train.reset_index(drop=True)
         y_val = y_val.reset_index(drop=True)
         y_test = y_test.reset_index(drop=True)
-        
-        return x_train, y_train, x_val, y_val, x_test, y_test
-        
+
+        # 計算類別權重
+        class_counts = y_train.value_counts()
+        total_samples = len(y_train)
+        weights = total_samples / class_counts
+        weights = weights.sort_index()  # 確保權重是按類別索引排序
+        weights = torch.tensor(weights.values, dtype=torch.float32)
+
+        return x_train, y_train, x_val, y_val, x_test, y_test, weights, feature_names
+
     def build_data_loader(x_train, y_train, x_val, y_val, x_test, y_test):
         
         # 轉換為張量
@@ -100,13 +111,30 @@ def MLP_evaluate_tabular_data(datapath, savepath):
         
         return train_loader, val_loader, test_loader
             
-    def fit_model(model, train_loader, val_loader, criterion, optimizer, epochs, train_losses, val_losses, train_accs, val_accs, patience=10, min_delta=0.001):
+    def fit_model(model, train_loader, val_loader, criterion, optimizer, epochs, patience=10, min_delta=0.001, savepath='./'):
+        
+        def plot_loss_acc(train_losses, val_losses, train_accs, val_accs, savepath):
+            plt.plot(train_losses, label='Training Loss')
+            plt.plot(val_losses, label='Validation Loss')
+            plt.legend()
+            plt.savefig(savepath + '/loss.png')
+            plt.close()
+            
+            plt.plot(train_accs, label='Training Accuracy')
+            plt.plot(val_accs, label='Validation Accuracy')
+            plt.legend()
+            plt.savefig(savepath + '/accuracy.png')
+            plt.close()
+        
         best_val_loss = float('inf')
         best_model = None
         patience_counter = 0
+        train_losses = []
+        val_losses = []
+        train_accs = []
+        val_accs = []
         
         for epoch in range(epochs):
-            model.train()  # 確保模型在訓練模式
             total_train_loss = 0
             total_val_loss = 0
             total_train_correct = 0
@@ -114,6 +142,7 @@ def MLP_evaluate_tabular_data(datapath, savepath):
             total_train_samples = 0
             total_val_samples = 0
             
+            model.train()
             for data, target in train_loader:
                 optimizer.zero_grad()
                 output_train = model(data)
@@ -125,7 +154,7 @@ def MLP_evaluate_tabular_data(datapath, savepath):
                 total_train_correct += (output_train.argmax(1) == target).sum().item()
                 total_train_samples += data.size(0)
             
-            model.eval()  # 設定模型到評估模式
+            model.eval()
             with torch.no_grad():
                 for data, target in val_loader:
                     output_val = model(data)
@@ -147,11 +176,11 @@ def MLP_evaluate_tabular_data(datapath, savepath):
             
             print(f'Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}, Train Acc: {train_accuracy:.4f}, Val Acc: {val_accuracy:.4f}')
             
-            # 檢查是否有改善
+            # Early Stopping
             if avg_val_loss < best_val_loss - min_delta:
                 best_val_loss = avg_val_loss
                 best_model = model.state_dict()
-                patience_counter = 0  # 重置耐心計數器
+                patience_counter = 0 
             else:
                 patience_counter += 1
             
@@ -162,19 +191,8 @@ def MLP_evaluate_tabular_data(datapath, savepath):
         if best_model is not None:
             model.load_state_dict(best_model)
             
-    def plot_loss_acc(train_losses, val_losses, train_accs, val_accs, savepath):
-        plt.plot(train_losses, label='Training Loss')
-        plt.plot(val_losses, label='Validation Loss')
-        plt.legend()
-        plt.savefig(savepath + '/loss.png')
-        plt.close()
-        
-        plt.plot(train_accs, label='Training Accuracy')
-        plt.plot(val_accs, label='Validation Accuracy')
-        plt.legend()
-        plt.savefig(savepath + '/accuracy.png')
-        plt.close()
-
+        plot_loss_acc(train_losses, val_losses, train_accs, val_accs, savepath)
+            
     def save_test_results(model, mcc, acc, precision, recall, f1, auc, cm, savepath):
         results = {
             'MCC': mcc,
@@ -199,23 +217,22 @@ def MLP_evaluate_tabular_data(datapath, savepath):
         torch.save(model.state_dict(), savepath + '/model.pth')
         
     # 1. data preprocessing
-    x_train, y_train, x_val, y_val, x_test, y_test = preprocess_tabular_data(datapath)
+    x_train, y_train, x_val, y_val, x_test, y_test, weights, feature_names = preprocess_tabular_data(datapath)
     train_loader, val_loader, _ = build_data_loader(x_train, y_train, x_val, y_val, x_test, y_test)
     
     # 2. build model
     model = MLP(x_train.shape[1], len(y_train.unique()), 0.2)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(weight=weights.float())
     
-    epochs = 100
-    train_losses = []
-    val_losses = []
-    train_accs = []
-    val_accs = []
-    fit_model(model, train_loader, val_loader, criterion, optimizer, epochs, train_losses, val_losses, train_accs, val_accs)
+    epochs = 500
+    patience = 20
+    min_delta = 0.001
+    fit_model(model, train_loader, val_loader, criterion, optimizer, epochs, patience, min_delta, savepath)
     
     # 3. evaluate model
     model.eval()
+
     with torch.no_grad():
         test_outputs = model(torch.tensor(x_test).float())
         test_labels_pred = torch.max(test_outputs, 1)[1].numpy()
@@ -223,16 +240,24 @@ def MLP_evaluate_tabular_data(datapath, savepath):
     acc = accuracy_score(y_test, test_labels_pred)
     precision, recall, f1, _ = precision_recall_fscore_support(y_test, test_labels_pred, average='macro')
     cm = confusion_matrix(y_test, test_labels_pred)
+    
+    background = torch.tensor(x_train, dtype=torch.float32)
+    explainer = shap.GradientExplainer(model, background)
+    shap_values = explainer.shap_values(torch.tensor(x_val, dtype=torch.float32))
+    shap.summary_plot(shap_values, x_test, feature_names=feature_names)
+
     if len(y_test.unique()) == 2:
         auc = roc_auc_score(y_test, test_outputs.numpy()[:,1])
     else:
         auc = None
 
     # 4. save process and results
-    plot_loss_acc(train_losses, val_losses, train_accs, val_accs, savepath)
     save_test_results(model, mcc, acc, precision, recall, f1, auc, cm, savepath)
     
     print('Model and test results saved successfully.')
     
 def AutoEncoder_imputing_missed_data():
+    pass
+
+def Masked_AutoEncoder_augmenting_figures():
     pass
