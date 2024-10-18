@@ -15,15 +15,21 @@ def MLP_evaluate_tabular_data(datapath, savepath):
     Build a MLP model to quickly analyze tabular data
     
     Args:
-        datapath: str, 輸入資料路徑
-        savepath: str, 儲存模型與測試結果的路徑
+        datapath: str, path to the data file
+        savepath: str, path to save the analysis results
         
     Example:
+        import os
         from ML_utils import MLP_evaluate_tabular_data
-    
-        MLP_evaluate_tabular_data('./data/data.csv', './analysis_results')
-    '''
 
+        data_path = './data/example.csv'
+        save_path = './analysis_result/analysis_results'
+        
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+    
+        MLP_evaluate_tabular_data(data_path, save_path)
+    '''
     
     class MLP(nn.Module):
         '''
@@ -55,33 +61,29 @@ def MLP_evaluate_tabular_data(datapath, savepath):
         x = data.drop('label', axis=1)
         y = data['label']
         
-        # 如果y的類別不是從0開始，重新編碼
+        # recoding the label
         if y.min() != 0:
             y = y - y.min()
         
-        # Label Encoding
+        # One-hot encoding
         if (x.dtypes == 'object').any():
             x = pd.get_dummies(x)
 
         feature_names = x.columns
-        print(feature_names)
 
-        # 切割訓練集、測試集
         x_temp, x_test, y_temp, y_test = train_test_split(x, y, test_size=0.2, random_state=None, stratify=y)
 
-        # 數值歸一化
         scaler = MinMaxScaler()
         x_temp = scaler.fit_transform(x_temp)
         x_test = scaler.transform(x_test)
         
-        # 切割訓練集、驗證集
         x_train, x_val, y_train, y_val = train_test_split(x_temp, y_temp, test_size=0.2, random_state=None, stratify=y_temp)
         
         y_train = y_train.reset_index(drop=True)
         y_val = y_val.reset_index(drop=True)
         y_test = y_test.reset_index(drop=True)
 
-        # 計算類別權重
+        # class weights
         class_counts = y_train.value_counts()
         total_samples = len(y_train)
         weights = total_samples / class_counts
@@ -91,8 +93,7 @@ def MLP_evaluate_tabular_data(datapath, savepath):
         return x_train, y_train, x_val, y_val, x_test, y_test, weights, feature_names
 
     def build_data_loader(x_train, y_train, x_val, y_val, x_test, y_test):
-        
-        # 轉換為張量
+    
         X_train_tensor = torch.tensor(x_train, dtype=torch.float32)
         y_train_tensor = torch.tensor(y_train, dtype=torch.long)
         X_val_tensor = torch.tensor(x_val, dtype=torch.float32)
@@ -100,7 +101,6 @@ def MLP_evaluate_tabular_data(datapath, savepath):
         X_test_tensor = torch.tensor(x_test, dtype=torch.float32)
         y_test_tensor = torch.tensor(y_test, dtype=torch.long)
 
-        # 創建數據加載器
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
         val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
         test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
@@ -215,7 +215,14 @@ def MLP_evaluate_tabular_data(datapath, savepath):
         plt.close()
         
         torch.save(model.state_dict(), savepath + '/model.pth')
-        
+    
+    def save_feature_importance(model, x_train, x_val, x_test, feature_names):
+        background = torch.tensor(x_train, dtype=torch.float32)
+        explainer = shap.GradientExplainer(model, background)
+        shap_values = explainer.shap_values(torch.tensor(x_val, dtype=torch.float32))
+        shap.summary_plot(shap_values, x_test, feature_names=feature_names, show = False)
+        plt.savefig(savepath + '/feature_importance.png')
+    
     # 1. data preprocessing
     x_train, y_train, x_val, y_val, x_test, y_test, weights, feature_names = preprocess_tabular_data(datapath)
     train_loader, val_loader, _ = build_data_loader(x_train, y_train, x_val, y_val, x_test, y_test)
@@ -240,18 +247,13 @@ def MLP_evaluate_tabular_data(datapath, savepath):
     acc = accuracy_score(y_test, test_labels_pred)
     precision, recall, f1, _ = precision_recall_fscore_support(y_test, test_labels_pred, average='macro')
     cm = confusion_matrix(y_test, test_labels_pred)
-    
-    background = torch.tensor(x_train, dtype=torch.float32)
-    explainer = shap.GradientExplainer(model, background)
-    shap_values = explainer.shap_values(torch.tensor(x_val, dtype=torch.float32))
-    shap.summary_plot(shap_values, x_test, feature_names=feature_names)
-
     if len(y_test.unique()) == 2:
         auc = roc_auc_score(y_test, test_outputs.numpy()[:,1])
     else:
         auc = None
 
     # 4. save process and results
+    save_feature_importance(model, x_train, x_val, x_test, feature_names)
     save_test_results(model, mcc, acc, precision, recall, f1, auc, cm, savepath)
     
     print('Model and test results saved successfully.')
