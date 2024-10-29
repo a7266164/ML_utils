@@ -222,6 +222,7 @@ def MLP_evaluate_tabular_data(datapath, savepath):
         shap_values = explainer.shap_values(torch.tensor(x_val, dtype=torch.float32))
         shap.summary_plot(shap_values, x_test, feature_names=feature_names, show = False)
         plt.savefig(savepath + '/feature_importance.png')
+        plt.close()
     
     # 1. data preprocessing
     x_train, y_train, x_val, y_val, x_test, y_test, weights, feature_names = preprocess_tabular_data(datapath)
@@ -538,6 +539,7 @@ def AutoEncoder_imputing_missed_data(missing_data_path, model_path, save_path, n
         plt.ylabel('MSE')
         plt.title('MSE Change During ' + type)
         plt.savefig(os.path.join(save_path, type + '_MSE.png'))  # 儲存圖片
+        plt.close()
 
         return
 
